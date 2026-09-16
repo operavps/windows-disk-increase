@@ -1,135 +1,36 @@
-#Requires -RunAsAdministrator
-
-# ============================================================
-# Windows C: Drive Extension Script
-# ============================================================
-# This script:
-#   1. Updates the Windows storage cache
-#   2. Checks the current C: partition size
-#   3. Detects the maximum supported partition size
-#   4. Asks for confirmation before extending C:
-#   5. Extends the partition to the maximum available size
-# ============================================================
-
-$ErrorActionPreference = "Stop"
-
-
-# ------------------------------------------------------------
-# Load Storage Module
-# ------------------------------------------------------------
-# Provides Get-Partition, Resize-Partition, and related
-# storage management commands.
-# ------------------------------------------------------------
-
-Import-Module Storage
-
-
-# ------------------------------------------------------------
-# Refresh Storage Information
-# ------------------------------------------------------------
-# Forces Windows to refresh its view of the attached disks
-# and available storage space.
-# ------------------------------------------------------------
-
-Update-HostStorageCache
-
-
-# ------------------------------------------------------------
-# Get C: Drive Information
-# ------------------------------------------------------------
-# $currentPartition = Current size of the C: partition
-# $maximumSize      = Maximum size supported by the disk
-#                     and partition layout
-# ------------------------------------------------------------
-
-$currentPartition = Get-Partition -DriveLetter C
-$maximumSize = (Get-PartitionSupportedSize -DriveLetter C).SizeMax
-
-
-# ------------------------------------------------------------
-# Check Whether Additional Space Is Available
-# ------------------------------------------------------------
-
-if ($maximumSize -le $currentPartition.Size) {
-
-    Write-Host ""
-    Write-Host "No additional disk space is available to extend." `
-        -ForegroundColor Red
-
-    exit 0
-}
-
-
-# ------------------------------------------------------------
-# Calculate and Display Disk Sizes
-# ------------------------------------------------------------
-
-$currentSizeGB = [math]::Round(
-    $currentPartition.Size / 1GB,
-    2
-)
-
-$maximumSizeGB = [math]::Round(
-    $maximumSize / 1GB,
-    2
-)
-
-Write-Host ""
-Write-Host "Current C: drive size : $currentSizeGB GB"
-Write-Host "Available maximum     : $maximumSizeGB GB"
-Write-Host ""
-
-
-# ------------------------------------------------------------
-# Ask User for Confirmation
-# ------------------------------------------------------------
-# Y = Continue with disk extension
-# N = Cancel
-# ------------------------------------------------------------
-
-$confirmation = choice `
-    /C YN `
-    /N `
-    /M "Extend C: drive from $currentSizeGB GB to $maximumSizeGB GB? [Y/N] "
-
-
-# ------------------------------------------------------------
-# Extend C: Drive
-# ------------------------------------------------------------
-
-if ($LASTEXITCODE -eq 1) {
-
-    Write-Host ""
-    Write-Host "Extending C: drive..." -ForegroundColor Cyan
-
-    Resize-Partition `
-        -DriveLetter C `
-        -Size $maximumSize
-
-
-    # --------------------------------------------------------
-    # Verify New Partition Size
-    # --------------------------------------------------------
-
-    $finalSizeGB = [math]::Round(
-        (Get-Partition -DriveLetter C).Size / 1GB,
-        2
-    )
-
-    Write-Host ""
-    Write-Host "C: drive successfully extended." `
-        -ForegroundColor Green
-
-    Write-Host "Disk: $currentSizeGB GB -> $finalSizeGB GB" `
-        -ForegroundColor Green
-}
-else {
-
-    # --------------------------------------------------------
-    # User Cancelled the Operation
-    # --------------------------------------------------------
-
-    Write-Host ""
-    Write-Host "Disk extension was not approved." `
-        -ForegroundColor Yellow
+# Keep settings local when invoked through iex.
+& {
+    $ErrorActionPreference = 'Stop'
+    try {
+        $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+        $principal = New-Object Security.Principal.WindowsPrincipal($identity)
+        if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+            throw 'Open Windows PowerShell using Run as administrator, then run the command again.'
+        }
+        Import-Module Storage -ErrorAction Stop
+        Update-HostStorageCache -ErrorAction Stop
+        $partition = Get-Partition -DriveLetter C -ErrorAction Stop
+        $maximumSize = (Get-PartitionSupportedSize -DriveLetter C -ErrorAction Stop).SizeMax
+        if ($maximumSize -le $partition.Size) {
+            Write-Host 'No additional space is available to extend C:. Enlarge the underlying disk and ensure unallocated space is immediately after C:; a recovery partition can block extension.' -ForegroundColor Yellow
+            return
+        }
+        $beforeGB = [math]::Round($partition.Size / 1GB, 2)
+        $maximumGB = [math]::Round($maximumSize / 1GB, 2)
+        $answer = Read-Host "Extend C: from $beforeGB GB to $maximumGB GB? [Y/N]"
+        if ($answer -notmatch '^\s*(y|yes)\s*$') {
+            Write-Host 'Disk extension was not approved.' -ForegroundColor Yellow
+            return
+        }
+        Resize-Partition -DiskNumber $partition.DiskNumber -PartitionNumber $partition.PartitionNumber -Size $maximumSize -ErrorAction Stop
+        $after = Get-Partition -DiskNumber $partition.DiskNumber -PartitionNumber $partition.PartitionNumber -ErrorAction Stop
+        if ($after.Size -le $partition.Size) {
+            throw 'C: did not increase in size. Check the disk layout in Disk Management.'
+        }
+        $afterGB = [math]::Round($after.Size / 1GB, 2)
+        Write-Host "C: extended: $beforeGB GB -> $afterGB GB" -ForegroundColor Green
+    }
+    catch {
+        Write-Error -Message ("Disk extension failed: {0}" -f $_.Exception.Message) -ErrorAction Continue
+    }
 }
